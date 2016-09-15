@@ -1,6 +1,7 @@
 #! /bin/sh
 
 # Path to GDB macros file.  Customize for your site.
+###--- Change the path to point to your gdb-macros file ---### 
 GDBMACROS=/home/ramesh/EE461S/SKKU/pintos/misc/gdb-macros
 
 # Choose correct GDB.
