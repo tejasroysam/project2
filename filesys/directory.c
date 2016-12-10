@@ -26,7 +26,7 @@ struct dir_entry
 bool
 dir_create (block_sector_t sector, size_t entry_cnt)
 {
-  return inode_create (sector, entry_cnt * sizeof (struct dir_entry));
+  return inode_create (sector, entry_cnt * sizeof (struct dir_entry), true);
 }
 
 /* Opens and returns the directory for the given INODE, of which
@@ -124,11 +124,14 @@ dir_lookup (const struct dir *dir, const char *name,
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
 
-  if (lookup (dir, name, &e, NULL))
-    *inode = inode_open (e.inode_sector);
-  else
-    *inode = NULL;
-
+	//ensure atomicity
+	inode_lock(dir_get_inode((struct dir*)dir));
+	if (lookup (dir, name, &e, NULL))
+		*inode = inode_open (e.inode_sector);
+	else
+		*inode = NULL;
+	inode_unlock(dir_get_inode(dir));
+	
   return *inode != NULL;
 }
 
@@ -148,13 +151,28 @@ dir_add (struct dir *dir, const char *name, block_sector_t inode_sector)
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
 
+	//enforce atomicity
+	inode_lock(dir_get_inode(dir));
   /* Check NAME for validity. */
   if (*name == '\0' || strlen (name) > NAME_MAX)
-    return false;
+    goto done;
 
   /* Check that NAME is not in use. */
   if (lookup (dir, name, NULL, NULL))
     goto done;
+
+	//todo:// need to set inode parent
+	 
+	//struct inode* i = inode_open(inode_sector);
+  	//if (!i){
+      		//goto done;
+    	//}
+
+  	if(inode_add_parent( inode_get_inumber(dir_get_inode(dir)), inode_sector) == false) {
+		goto done;
+	}
+	
+	//inode_close(i);
 
   /* Set OFS to offset of free slot.
      If there are no free slots, then it will be set to the
@@ -175,6 +193,8 @@ dir_add (struct dir *dir, const char *name, block_sector_t inode_sector)
   success = inode_write_at (dir->inode, &e, sizeof e, ofs) == sizeof e;
 
  done:
+	//release inode lock
+	inode_unlock(dir_get_inode(dir));
   return success;
 }
 
@@ -192,6 +212,9 @@ dir_remove (struct dir *dir, const char *name)
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
 
+	//ensure atomicity
+	inode_lock(dir_get_inode(dir));
+
   /* Find directory entry. */
   if (!lookup (dir, name, &e, &ofs))
     goto done;
@@ -200,6 +223,22 @@ dir_remove (struct dir *dir, const char *name)
   inode = inode_open (e.inode_sector);
   if (inode == NULL)
     goto done;
+
+	bool empty = true;
+	//iterate to check emptiness
+	off_t index = 0;
+	struct dir_entry curr;
+	while(inode_read_at(inode, &curr, sizeof curr, index) == (sizeof curr)){
+		index += (sizeof curr);
+		if(curr.in_use) empty = false;
+		break;
+	}
+
+	//check if inode is a directory that has other dependents or is empty references or open_cnt
+	if(inode_is_file(inode) == false)  {
+		 if(!empty || inode_get_open_cnt(inode) > 1) goto done;
+	}
+
 
   /* Erase directory entry. */
   e.in_use = false;
@@ -212,6 +251,7 @@ dir_remove (struct dir *dir, const char *name)
 
  done:
   inode_close (inode);
+	inode_unlock(dir_get_inode(dir));
   return success;
 }
 
@@ -222,15 +262,33 @@ bool
 dir_readdir (struct dir *dir, char name[NAME_MAX + 1])
 {
   struct dir_entry e;
-
+	//atomicity
+	inode_lock(dir_get_inode(dir));
   while (inode_read_at (dir->inode, &e, sizeof e, dir->pos) == sizeof e) 
     {
       dir->pos += sizeof e;
       if (e.in_use)
         {
           strlcpy (name, e.name, NAME_MAX + 1);
+			inode_unlock(dir_get_inode(dir));
           return true;
         } 
     }
+	inode_unlock(dir_get_inode(dir));
   return false;
+}
+
+
+//get the parent directory
+//find inode that points to this dir inode
+//pass ptr to open inode
+bool findParent(struct dir* d, struct inode **i){
+	block_sector_t sec = getInodeParent(dir_get_inode(d));
+	//read inode from sector
+	*i = inode_open(sec);
+	//check if not allocated
+	if(!*i){
+		return false;
+	}
+	return true;
 }

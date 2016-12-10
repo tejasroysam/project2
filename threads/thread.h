@@ -4,6 +4,31 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
+
+struct childproc{
+	int tid;
+	bool is_waiting;
+	struct list_elem index;
+	int status;
+	bool has_exited;
+	//positive when loaded correctly, negative when init fails, zero when uninitialized
+	int is_loaded;
+	//from threads/synch.h
+	//struct lock childlock;
+
+	struct semaphore loaded;
+	struct semaphore exited;
+};
+
+struct openfile{
+	int fd;
+	struct file *f;
+	struct list_elem index;
+	struct dir *directory;		
+	bool dircheck;
+	bool isfile;
+};
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -80,6 +105,9 @@ typedef int tid_t;
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
+
+
+
 struct thread
   {
     /* Owned by thread.c. */
@@ -100,13 +128,34 @@ struct thread
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
+
+	//things added for getting child processes in syscalls
+	//pointer to parent
+	tid_t parent;
+	struct list children;
+	struct childproc* child;
+	//int children[128];
+	//int numchild;
+
+	//files
+	//need a list of file descriptors associated with this thread
+	struct list files;
+	//counter of file descriptors
+	int numfd;
+	struct file* deny;
+
+	//current working directory
+	struct dir *cwdir;
+
+	struct list locks;
   };
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
-
+int inAllList(int tid);
+enum thread_status checkStatus (int tid);
 void thread_init (void);
 void thread_start (void);
 
@@ -123,7 +172,7 @@ struct thread *thread_current (void);
 tid_t thread_tid (void);
 const char *thread_name (void);
 
-void thread_exit (void) NO_RETURN;
+void thread_exit (int status) NO_RETURN;
 void thread_yield (void);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */

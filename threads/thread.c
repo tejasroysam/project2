@@ -13,6 +13,7 @@
 #include "threads/vaddr.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+#include "userprog/syscall.h"
 #endif
 
 /* Random value for struct thread's `magic' member.
@@ -71,6 +72,78 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
+//check if tid is in the all list
+int inAllList (int tid)
+{
+	bool found = false;
+	struct list_elem *current;
+	struct thread *curr;
+	for(current = list_begin(&all_list); current != list_end(&all_list);
+			current = list_next(current)){
+		curr = list_entry(current, struct thread, allelem);
+		//compare with current thread tid
+		if(curr->tid == tid){
+			found = true;
+			break;
+		}
+	}
+	if(!found){	
+		return 0;
+	}
+	else{
+		return 1;
+	}	
+}
+
+//check status
+enum thread_status checkStatus (int tid)
+{
+	bool found = false;
+	struct list_elem *current;
+	struct thread *curr;
+	for(current = list_begin(&all_list); current != list_end(&all_list);
+			current = list_next(current)){
+		curr = list_entry(current, struct thread, allelem);
+		//compare with current thread tid
+		if(curr->tid == tid){
+			found = true;
+			break;
+		}
+	}
+	if(found){	
+		return curr->status;
+	}
+	else{
+		return -1;
+	}	
+}
+
+//check if tid is in the ready list
+/*
+int 
+inReadyList(int tid)
+{
+	bool found = false;
+	struct list_elem *current;
+	struct thread *curr;
+	for(current = list_begin(&ready_list); current != list_end(&ready_list);
+			current = list_next(current)){
+		curr = list_entry(current, struct thread, index);
+		//compare with current thread tid
+		if(curr->tid == tid){
+			child = true;
+			break;
+		}
+	}
+	if(!found){	
+		return 0;
+	}
+	else{
+		return 1;
+	}	
+}
+*/
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -94,10 +167,16 @@ thread_init (void)
   list_init (&all_list);
 
   /* Set up a thread structure for the running thread. */
+	
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
+
+	//current working dir
+	initial_thread->cwdir = NULL;
+
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -172,6 +251,8 @@ thread_create (const char *name, int priority,
   struct switch_threads_frame *sf;
   tid_t tid;
 
+  
+
   ASSERT (function != NULL);
 
   /* Allocate thread. */
@@ -182,6 +263,10 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+  
+  //save stack setup to pass later
+  enum intr_level threadstack;
+  threadstack = intr_disable();
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -197,6 +282,35 @@ thread_create (const char *name, int priority,
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
+
+  //pass saved stack
+  intr_set_level(threadstack);
+ 
+  //define parent as current thread (invoker)
+  t->parent = thread_tid();
+	//t->deny = NULL;
+	
+  //child processes handling initialization
+  //need to add child process to parent
+  //t->numchild = 0;
+	
+  	//t->numfd = 0;
+	struct childproc* temp = malloc(sizeof(struct childproc));
+	//setup: pass parent vals and set flags
+	temp->tid = t->tid;
+	temp->is_waiting = false;
+	temp->status = 0;
+	temp->has_exited = false;
+	temp->is_loaded = 0;
+	//lock_init(&temp->childlock);
+	list_push_back(&thread_current()->children, &temp->index);
+	
+	//asign to thread
+	t->child = temp;
+	t->cwdir = NULL;
+	if(thread_current()->cwdir != NULL){
+		t->cwdir = dir_reopen(thread_current()->cwdir);
+	}
 
   /* Add to run queue. */
   thread_unblock (t);
@@ -278,7 +392,7 @@ thread_tid (void)
 /* Deschedules the current thread and destroys it.  Never
    returns to the caller. */
 void
-thread_exit (void) 
+thread_exit (int status) 
 {
   ASSERT (!intr_context ());
 
@@ -290,6 +404,21 @@ thread_exit (void)
      and schedule another process.  That process will destroy us
      when it calls thread_schedule_tail(). */
   intr_disable ();
+	//release any locks
+	
+	struct thread *cur = thread_current();
+	struct list_elem *next;
+	struct list_elem *e = list_begin(&cur->locks);
+	struct list_elem *last = list_end (&cur->locks);
+
+	while (e != last){
+		next = list_next(e);
+		struct lock *l = list_entry (e, struct lock, index);
+		lock_release(l);
+		list_remove(&l->index);
+		e = next;
+	}
+
   list_remove (&thread_current()->allelem);
   thread_current ()->status = THREAD_DYING;
   schedule ();
@@ -422,7 +551,7 @@ kernel_thread (thread_func *function, void *aux)
 
   intr_enable ();       /* The scheduler runs with interrupts off. */
   function (aux);       /* Execute the thread function. */
-  thread_exit ();       /* If function() returns, kill the thread. */
+  thread_exit (0);       /* If function() returns, kill the thread. */
 }
 
 /* Returns the running thread. */
@@ -463,6 +592,14 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+	//initialize lists
+	list_init(&t->children);
+	list_init(&t->files);
+	list_init(&t->locks);
+	//start fds after stdin and stdout
+	t->numfd = 2;
+	t->child = NULL;
+	t->parent = -1;
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
